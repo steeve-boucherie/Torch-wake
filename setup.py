@@ -123,7 +123,7 @@ def create_env() -> None:
 # SETUP
 setup(
     # Name of the package
-    name='pytorch-sandbox',
+    name='torch_wake',
 
     # Packages to include into the distribution
     packages=find_packages('.'),
