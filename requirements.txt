@@ -1,0 +1,37 @@
+# Standard
+scipy
+numpy
+pandas
+xarray
+
+# Plot
+matplotlib
+seaborn
+
+# Jupyter
+ipykernel
+ipywidgets
+
+# ML scpecify
+scikit-learn
+# pytorch
+mlflow
+
+# Pkg mngmt
+python-dotenv
+
+# Farm simulation
+py_wake
+
+# pyTorch
+--extra-index-url https://download.pytorch.org/whl/rocm6.3
+torch
+torchvision
+torchaudio
+
+# Pythonic
+pydantic
+flake8
+
+# Files
+pyaml
