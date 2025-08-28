@@ -28,6 +28,7 @@ py_wake
 torch
 torchvision
 torchaudio
+torch_geometric
 
 # Pythonic
 pydantic
