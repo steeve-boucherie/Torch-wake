@@ -3,25 +3,201 @@ Utility classes and method to generate synthetic data for training \
 model.
 """
 import logging
+import warnings
+from itertools import product
 from typing import List, Optional
+# from typing_extensions import Annotated
 
 import matplotlib.pyplot as plt
 
 import numpy as np
+from numpy.random import RandomState
 
 import pandas as pd
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator
+)
 
 from py_wake.site import UniformWeibullSite
+from py_wake.wind_farm_models.wind_farm_model import SimulationResult
+
+from sklearn.preprocessing import MinMaxScaler
 
 from scipy import stats
+
+import torch
+from torch import Tensor
+
+from torch_geometric.data import Data
 
 import xarray as xr
 
 
+# PACKAGE IMPORTS
+from torch_wake.utils import drop_nondim_coords
+
+
 # LOGGER
 logger = logging.getLogger(__name__)
+
+
+# UTILS
+def _prepare_time_data(
+    sim_res: SimulationResult,
+    edge_index: Tensor,
+    toi: int
+) -> List[Data]:
+    """
+    Given the pywake time simulation results, prepare the data for training.
+
+    Parameters
+    ----------
+    sim_res: SimulationResult
+        An instance of pyWake's SimulationResult class to be used for generating \
+        the training data.
+    edge_index: Tensor
+        An instance of torch.Tensor defining the edge connections.
+    toi: int
+        The ID of the turbine of interest - considered as the feature.
+
+    Returns
+    -------
+        List[Data]
+    """
+    sim_res = (
+        sim_res
+        .rename({'Power': 'power'})
+        .assign({
+            'wd_x': np.cos(np.deg2rad(sim_res['wd'])),
+            'wd_y': np.sin(np.deg2rad(sim_res['wd'])),
+        })
+    )
+
+    groups = (
+        xr.merge([
+            drop_nondim_coords(sim_res[key])
+            for key in ['x', 'y', 'ws', 'wd_x', 'wd_y', 'power']
+        ])
+        .pipe(lambda ds: (
+            ds.assign(
+                power_feat=xr.where(
+                    ds['wt'] == 'toi',
+                    0,
+                    ds['power']
+                )
+            )
+        ))
+        .to_dataframe()
+        .pipe(lambda df: (
+            df.assign(**{
+                c: (MinMaxScaler().fit_transform(df[[c]]))
+                for c in df.columns
+            })
+        ))
+        .astype(np.float32)        
+        .reorder_levels(['time', 'wt'])
+        .sort_index(axis=0)
+        .reset_index()
+        .groupby('time')
+    )
+
+    data_list = []
+    all_keys = list(groups.groups.keys())
+    for n, dt in enumerate(all_keys):
+        if n == 0 or ((n + 1) % 1000 == 0):
+            msg = f'Processing timestamp {n + 1:5d} of {len(all_keys):5d}'
+            logger.info(msg)
+
+        df = groups.get_group(dt)
+        x = torch.tensor(df[['x', 'y', 'ws', 'wd_x', 'wd_y', 'power_feat']].values)
+        y = torch.tensor(df['power'].values)
+
+        data = Data(x=x, edge_index=edge_index, y=y)
+        data.toi = toi
+        data_list.append(data)
+
+    return data_list
+
+
+def prepare_data(
+    sim_res: SimulationResult,
+    edge_index: Tensor,
+    toi: int
+) -> List[Data]:
+    """
+    Given the pywake simulation results, prepare the data for training.
+
+    Parameters
+    ----------
+    sim_res: SimulationResult
+        An instance of pyWake's SimulationResult class to be used for generating \
+        the training data.
+    edge_index: Tensor
+        An instance of torch.Tensor defining the edge connections.
+    toi: int
+        The ID of the turbine of interest - considered as the feature.
+
+    Returns
+    -------
+        List[Data]
+    """
+    if 'time' in sim_res.dims:
+        data_list = _prepare_time_data(sim_res, edge_index, toi)
+
+    else:
+        msg = 'Only support simulation results with time, so far.'
+        logger.err(msg)
+        raise NotImplementedError(msg)
+
+    return data_list
+
+
+def dummy_wind(
+    ws_range: Optional[np.ndarray] = None,
+    wd_range: Optional[np.ndarray] = None,
+    ti: float = .1
+) -> xr.Dataset:
+    """
+    Generate dataset of dummy conditions using the product of \
+        wind speed and wind direction arrays.
+
+    Parameters
+    ----------
+    ws_range: np.ndarray | None
+        (Optional) Array of wind speeds.
+    wd_range: np.ndarray | None
+        (Optional) Array of wind direction.
+    ti: float
+        A number defining the selected turbulence intensity level.
+
+    Returns
+    -------
+        Dataset
+    """
+    # Get defaults
+    ws_range = [ws_range, np.arange(3, 21)][ws_range is None]
+    wd_range = [wd_range, np.arange(0, 360, 5)][wd_range is None]
+
+    data = [[ws, wd] for ws, wd in product(ws_range, wd_range)]
+    out = (
+        pd.DataFrame(
+            data=data,
+            columns=['ws', 'wd'],
+            index=pd.Index(
+                data=np.arange(len(data)),
+                name='time'
+            )
+        )
+        .assign(ti=ti)
+        .to_xarray()
+    )
+
+    return out
 
 
 # Layout Generator
@@ -147,6 +323,7 @@ class MixtureFlowGenerator(BaseModel):
 
     # Internal
     comp_weights: List[float] = None
+    rng: Optional[RandomState] = Field(default=None, validate_default=True)
     wd_components: List[stats.vonmises] = None
     weibull_scales: List[float] = None
 
@@ -154,10 +331,10 @@ class MixtureFlowGenerator(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # Properties
-    @property
-    def rng(self) -> np.random.RandomState:
-        """Return the random Generator"""
-        return np.random.RandomState(self.random_seed)
+    # @property
+    # def rng(self) -> np.random.RandomState:
+    #     """Return the random Generator"""
+    #     return np.random.RandomState(self.random_seed)
 
     # Methods
     def _is_init(self) -> None:
@@ -307,3 +484,30 @@ class MixtureFlowGenerator(BaseModel):
         )
 
         return site
+
+    # Validator
+    @field_validator('rng')
+    @classmethod
+    def init_rng(
+        cls,
+        v: Optional[RandomState],
+        info: ValidationInfo,
+    ) -> RandomState:
+        """
+        Initialize the random State by the selected seed number.
+
+        Returns
+        -------
+            RandomState
+        """
+        random_seed = info.data['random_seed']
+        
+        if v is not None:
+            msg = 'Improper initialization of random state. ' \
+                  'This is an internal attribue. Use "random_seed"' \
+                  'to control the selected seed.\n' \
+                  f'Currently selected seed: {random_seed}.'  
+            logger.warning(msg)
+            warnings.warn(msg)
+
+        return RandomState(random_seed)

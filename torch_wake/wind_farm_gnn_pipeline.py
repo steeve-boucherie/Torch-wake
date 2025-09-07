@@ -115,7 +115,7 @@ class SyntheticWindSimulator:
         timestamps = pd.date_range('2023-01-01', periods=n_samples, freq='H')
 
         return pd.DataFrame({
-            'timestamp': timestamps,
+            'time': timestamps,
             'wind_speed': np.clip(wind_speeds, 3, 25),  # Realistic wind speed range
             'wind_direction': wind_directions
         })
@@ -241,7 +241,7 @@ class FarmFlowSimulator:
         results['wind_speed_eff'] = effective_speeds
         results['wind_direction'] = wind_direction
         results['power'] = powers
-        results['wind_speed_free'] = wind_speed
+        results['ws'] = wind_speed
 
         return results
 
@@ -264,7 +264,7 @@ class FarmFlowSimulator:
                 print(f"Progress: {idx}/{len(wind_timeseries)}")
 
             timestep_result = self.simulate_timestep(row['wind_speed'], row['wind_direction'])
-            timestep_result['timestamp'] = row['timestamp']
+            timestep_result['time'] = row['time']
             all_results.append(timestep_result)
 
         return pd.concat(all_results, ignore_index=True)
@@ -344,7 +344,7 @@ class GNNModelTrainer:
             List of PyTorch Geometric Data objects
         """
         # Get unique timestamps
-        timestamps = simulation_results['timestamp'].unique()
+        timestamps = simulation_results['time'].unique()
 
         # Create edge index (same for all timestamps)
         edge_index = self.create_graph_structure()
@@ -353,24 +353,24 @@ class GNNModelTrainer:
 
         for timestamp in timestamps:
             # Get data for this timestamp
-            ts_data = simulation_results[simulation_results['timestamp'] == timestamp].copy()
-            ts_data = ts_data.sort_values('turbine_id').reset_index(drop=True)
+            ts_data = simulation_results[simulation_results['time'] == timestamp].copy()
+            ts_data = ts_data.sort_values('wt').reset_index(drop=True)
 
             # Prepare features (exclude target turbine's power for features)
             features = []
             targets = []
 
-            for turbine_id in ts_data['turbine_id']:
-                row = ts_data[ts_data['turbine_id'] == turbine_id].iloc[0]
+            for turbine_id in ts_data['wt']:
+                row = ts_data[ts_data['wt'] == turbine_id].iloc[0]
 
                 # Features: position, wind conditions, but not power of target turbine
                 feature_vector = [
                     row['x'] / 1000,  # Normalize position
                     row['y'] / 1000,
-                    row['wind_speed_free'],
-                    row['wind_direction'] / 360,  # Normalize direction
-                    np.sin(np.radians(row['wind_direction'])),  # Cyclical encoding
-                    np.cos(np.radians(row['wind_direction'])),
+                    row['ws'],
+                    row['wd'] / 360,  # Normalize direction
+                    np.sin(np.radians(row['wd'])),  # Cyclical encoding
+                    np.cos(np.radians(row['wd'])),
                 ]
 
                 # Add neighbor power information (if not target turbine)
